@@ -4,9 +4,17 @@
   "private": true,
   "description": "Mobile-first judging portal for LifeHack 2026",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
+    "start": "wrangler dev",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply lifehack-2026-judging --local",
+    "db:migrate:remote": "wrangler d1 migrations apply lifehack-2026-judging --remote",
+    "db:seed:local": "wrangler d1 execute lifehack-2026-judging --local --file=./seeds/local-users.sql",
+    "users:generate": "node scripts/generate-users.mjs",
     "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "^4.28.1"
   },
   "engines": {
     "node": ">=20"

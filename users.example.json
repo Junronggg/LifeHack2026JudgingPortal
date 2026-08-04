@@ -1,0 +1,26 @@
+[
+  {
+    "id": "judge-general-1",
+    "name": "Professor Alex Tan",
+    "email": "alex@example.com",
+    "password": "replace-with-a-unique-random-password",
+    "role": "judge",
+    "judgeType": "general"
+  },
+  {
+    "id": "judge-company-1",
+    "name": "Maya Chen",
+    "email": "maya@example.com",
+    "password": "replace-with-a-different-random-password",
+    "role": "judge",
+    "judgeType": "company",
+    "companyCategoryId": "sustainability"
+  },
+  {
+    "id": "admin-1",
+    "name": "Event Operations",
+    "email": "operations@example.com",
+    "password": "replace-with-a-third-random-password",
+    "role": "admin"
+  }
+]

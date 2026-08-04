@@ -64,11 +64,6 @@ function renderLogin() {
         <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></div>
         <div class="form-error" id="login-error" role="alert"></div>
         <button class="primary-button" type="submit">Continue to portal</button>
-        <div class="demo-box"><p>Preview accounts</p><div class="demo-logins">
-          <button class="demo-login" type="button" data-demo="judge">General judge</button>
-          <button class="demo-login" type="button" data-demo="company">Company judge</button>
-          <button class="demo-login" type="button" data-demo="admin">Administrator</button>
-        </div></div>
       </form>
     </section>
   </main>`;
@@ -231,12 +226,6 @@ function route() {
 }
 
 app.addEventListener("click", async event => {
-  const demo = event.target.closest("[data-demo]");
-  if (demo) {
-    const credentials = { judge: ["judge@lifehack.test", "judge2026"], company: ["company@lifehack.test", "judge2026"], admin: ["admin@lifehack.test", "admin2026"] }[demo.dataset.demo];
-    document.querySelector("#email").value = credentials[0]; document.querySelector("#password").value = credentials[1];
-    return;
-  }
   const category = event.target.closest("[data-category]");
   if (category) { state.activeCategory = category.dataset.category; return renderJudge(); }
   const adminCategory = event.target.closest("[data-admin-category]");

@@ -2,4 +2,7 @@ data/
 node_modules/
 .env
 npm-debug.log*
-
+users.private.json
+seed-users.private.sql
+.wrangler/
+.dev.vars*
