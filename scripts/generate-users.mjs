@@ -3,14 +3,9 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const inputPath = path.resolve(process.argv[2] || "users.private.json");
-const outputPath = path.resolve(process.argv[3] || "seed-users.private.sql");
+const outputPath = path.resolve(process.argv[3] || "users.secret.private.json");
 const iterations = 210_000;
 const validCategories = new Set(["sustainability", "health", "inclusion"]);
-
-function sql(value) {
-  if (value === null || value === undefined) return "NULL";
-  return `'${String(value).replaceAll("'", "''")}'`;
-}
 
 function validate(user, index) {
   const prefix = `User ${index + 1}`;
@@ -31,18 +26,23 @@ users.forEach(validate);
 if (new Set(users.map(user => user.id)).size !== users.length) throw new Error("User ids must be unique.");
 if (new Set(users.map(user => user.email.toLowerCase())).size !== users.length) throw new Error("User emails must be unique.");
 
-const statements = [
-  "-- Generated locally. Do not commit this file.",
-  "BEGIN TRANSACTION;",
-  ...users.map(user => {
-    const salt = randomBytes(16);
-    const hash = pbkdf2Sync(user.password, salt, iterations, 32, "sha256");
-    return `INSERT INTO users (id, name, email, password_hash, password_salt, password_iterations, role, judge_type, company_category_id, active) VALUES (${sql(user.id)}, ${sql(user.name.trim())}, ${sql(user.email.trim().toLowerCase())}, ${sql(hash.toString("base64"))}, ${sql(salt.toString("base64"))}, ${iterations}, ${sql(user.role)}, ${sql(user.judgeType || null)}, ${sql(user.companyCategoryId || null)}, 1) ON CONFLICT(id) DO UPDATE SET name=excluded.name, email=excluded.email, password_hash=excluded.password_hash, password_salt=excluded.password_salt, password_iterations=excluded.password_iterations, role=excluded.role, judge_type=excluded.judge_type, company_category_id=excluded.company_category_id, active=1;`;
-  }),
-  "COMMIT;",
-  ""
-];
+const securedUsers = users.map(user => {
+  const salt = randomBytes(16);
+  const hash = pbkdf2Sync(user.password, salt, iterations, 32, "sha256");
+  return {
+    id: user.id,
+    name: user.name.trim(),
+    email: user.email.trim().toLowerCase(),
+    passwordHash: hash.toString("base64"),
+    passwordSalt: salt.toString("base64"),
+    passwordIterations: iterations,
+    role: user.role,
+    judgeType: user.judgeType || null,
+    companyCategoryId: user.companyCategoryId || null,
+    active: true
+  };
+});
 
-await writeFile(outputPath, statements.join("\n"), { flag: "wx" });
-console.log(`Created ${outputPath} with ${users.length} password-hashed users.`);
-console.log("Apply it with Wrangler, then delete it securely. Never commit this file.");
+await writeFile(outputPath, `${JSON.stringify(securedUsers)}\n`, { flag: "wx" });
+console.log(`Created ${outputPath} with ${securedUsers.length} password-hashed users.`);
+console.log("Store its entire contents in the USERS_JSON Worker secret, then delete the file.");

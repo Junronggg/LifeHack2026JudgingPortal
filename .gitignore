@@ -3,6 +3,6 @@ node_modules/
 .env
 npm-debug.log*
 users.private.json
-seed-users.private.sql
+users.secret.private.json
 .wrangler/
 .dev.vars*

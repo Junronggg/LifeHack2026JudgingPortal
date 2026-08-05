@@ -10,6 +10,13 @@ const SECURITY_HEADERS = {
 };
 const CONTENT_SECURITY_POLICY = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
+class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
 function json(payload, status = 200, extraHeaders = {}) {
   return Response.json(payload, { status, headers: { ...SECURITY_HEADERS, ...extraHeaders } });
 }
@@ -26,24 +33,19 @@ function parseCookies(header = "") {
   return cookies;
 }
 
-function safeUser(user) {
-  if (!user) return null;
-  return {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    judgeType: user.judge_type,
-    companyCategoryId: user.company_category_id
-  };
-}
-
-function bytesToHex(bytes) {
-  return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
+function bytesToBase64Url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
 }
 
 function base64ToBytes(value) {
   return Uint8Array.from(atob(value), character => character.charCodeAt(0));
+}
+
+function base64UrlToBytes(value) {
+  const standard = value.replaceAll("-", "+").replaceAll("_", "/");
+  return base64ToBytes(standard.padEnd(Math.ceil(standard.length / 4) * 4, "="));
 }
 
 function constantTimeEqual(left, right) {
@@ -53,9 +55,15 @@ function constantTimeEqual(left, right) {
   return difference === 0;
 }
 
-async function sha256(value) {
-  const encoded = new TextEncoder().encode(value);
-  return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", encoded)));
+async function hmac(value, secret) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  return new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)));
 }
 
 export async function verifyPassword(password, saltBase64, expectedHashBase64, iterations) {
@@ -74,42 +82,56 @@ export async function verifyPassword(password, saltBase64, expectedHashBase64, i
   return constantTimeEqual(new Uint8Array(bits), base64ToBytes(expectedHashBase64));
 }
 
-async function readJson(request) {
-  const declaredLength = Number(request.headers.get("content-length") || 0);
-  if (declaredLength > MAX_BODY_BYTES) throw new ApiError(413, "Request body is too large.");
+function usersFromEnv(env) {
   try {
-    return await request.json();
+    const users = JSON.parse(env.USERS_JSON);
+    if (!Array.isArray(users)) throw new Error("not an array");
+    return users;
   } catch {
-    throw new ApiError(400, "Invalid JSON body.");
+    throw new ApiError(500, "User accounts are not configured.");
   }
 }
 
-class ApiError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
+function safeUser(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    judgeType: user.judgeType || null,
+    companyCategoryId: user.companyCategoryId || null
+  };
 }
 
-function assertSameOrigin(request) {
-  if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) return;
-  const origin = request.headers.get("origin");
-  if (origin && origin !== new URL(request.url).origin) throw new ApiError(403, "Cross-origin request blocked.");
+async function createSession(user, env) {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({ sub: user.id, iat: now, exp: now + SESSION_TTL_SECONDS })));
+  const signature = bytesToBase64Url(await hmac(payload, env.SESSION_SECRET));
+  return `${payload}.${signature}`;
+}
+
+async function verifySession(token, env) {
+  if (!token || !env.SESSION_SECRET) return null;
+  const [payload, signature, extra] = token.split(".");
+  if (!payload || !signature || extra) return null;
+  const expected = await hmac(payload, env.SESSION_SECRET);
+  let supplied;
+  try { supplied = base64UrlToBytes(signature); } catch { return null; }
+  if (!constantTimeEqual(expected, supplied)) return null;
+  try {
+    const session = JSON.parse(new TextDecoder().decode(base64UrlToBytes(payload)));
+    if (!session.sub || !Number.isInteger(session.exp) || session.exp <= Math.floor(Date.now() / 1000)) return null;
+    return session;
+  } catch {
+    return null;
+  }
 }
 
 async function currentUser(request, env) {
-  const token = parseCookies(request.headers.get("cookie"))[COOKIE_NAME];
-  if (!token) return null;
-  const tokenHash = await sha256(token);
-  const now = Math.floor(Date.now() / 1000);
-  const user = await env.DB.prepare(`
-    SELECT u.id, u.name, u.email, u.role, u.judge_type, u.company_category_id
-    FROM sessions s
-    JOIN users u ON u.id = s.user_id
-    WHERE s.token_hash = ? AND s.expires_at > ? AND u.active = 1
-  `).bind(tokenHash, now).first();
-  if (!user) env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(tokenHash).run().catch(() => {});
-  return user || null;
+  const session = await verifySession(parseCookies(request.headers.get("cookie"))[COOKIE_NAME], env);
+  if (!session) return null;
+  return usersFromEnv(env).find(user => user.id === session.sub && user.active !== false) || null;
 }
 
 async function requireUser(request, env, role) {
@@ -119,12 +141,49 @@ async function requireUser(request, env, role) {
   return user;
 }
 
+async function readJson(request) {
+  const declaredLength = Number(request.headers.get("content-length") || 0);
+  if (declaredLength > MAX_BODY_BYTES) throw new ApiError(413, "Request body is too large.");
+  try { return await request.json(); }
+  catch { throw new ApiError(400, "Invalid JSON body."); }
+}
+
+function assertSameOrigin(request) {
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) return;
+  const origin = request.headers.get("origin");
+  if (origin && origin !== new URL(request.url).origin) throw new ApiError(403, "Cross-origin request blocked.");
+}
+
+async function sheetsRequest(env, action, data = null) {
+  if (!env.SHEETS_WEB_APP_URL || !env.SHEETS_SHARED_SECRET) throw new ApiError(500, "Google Sheets is not configured.");
+  const payload = JSON.stringify({
+    timestamp: Date.now(),
+    nonce: bytesToBase64Url(crypto.getRandomValues(new Uint8Array(18))),
+    action,
+    data
+  });
+  const signature = bytesToBase64Url(await hmac(payload, env.SHEETS_SHARED_SECRET));
+  let response;
+  try {
+    response = await fetch(env.SHEETS_WEB_APP_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ payload, signature }),
+      redirect: "follow"
+    });
+  } catch {
+    throw new ApiError(502, "The score service is temporarily unavailable. Please try again.");
+  }
+  let result;
+  try { result = await response.json(); }
+  catch { throw new ApiError(502, "The score service returned an invalid response."); }
+  if (!response.ok || !result.ok) throw new ApiError(502, result.error || "The score service rejected the request.");
+  return result.data;
+}
+
 async function scoreRows(env) {
-  const result = await env.DB.prepare(`
-    SELECT team_id, judge_id, impact, innovation, execution, presentation, notes, weighted_score, submitted_at
-    FROM scores
-  `).all();
-  return result.results || [];
+  const rows = await sheetsRequest(env, "snapshot");
+  return Array.isArray(rows) ? rows : [];
 }
 
 function progressFor(teamId, rows, required) {
@@ -134,8 +193,8 @@ function progressFor(teamId, rows, required) {
 
 function recommendations(user, rows, required) {
   const unscored = teams.filter(team => !rows.some(row => row.team_id === team.id && row.judge_id === user.id));
-  if (user.judge_type === "company") {
-    return unscored.filter(team => team.categoryId === user.company_category_id).map(team => team.id);
+  if (user.judgeType === "company") {
+    return unscored.filter(team => team.categoryId === user.companyCategoryId).map(team => team.id);
   }
   return unscored
     .map(team => ({ team, count: progressFor(team.id, rows, required).count }))
@@ -148,26 +207,15 @@ function recommendations(user, rows, required) {
 async function login(request, env) {
   const body = await readJson(request);
   const email = String(body.email || "").trim().toLowerCase();
-  const user = await env.DB.prepare(`
-    SELECT id, name, email, password_hash, password_salt, password_iterations, role, judge_type, company_category_id, active
-    FROM users WHERE email = ? COLLATE NOCASE LIMIT 1
-  `).bind(email).first();
-  const valid = user?.active === 1 && await verifyPassword(
+  const user = usersFromEnv(env).find(item => item.email.toLowerCase() === email);
+  const valid = user?.active !== false && await verifyPassword(
     String(body.password || ""),
-    user.password_salt,
-    user.password_hash,
-    user.password_iterations
+    user.passwordSalt,
+    user.passwordHash,
+    user.passwordIterations
   );
   if (!valid) throw new ApiError(401, "Email or password is incorrect.");
-
-  const token = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
-  const tokenHash = await sha256(token);
-  const now = Math.floor(Date.now() / 1000);
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM sessions WHERE expires_at <= ?").bind(now),
-    env.DB.prepare("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)")
-      .bind(tokenHash, user.id, now, now + SESSION_TTL_SECONDS)
-  ]);
+  const token = await createSession(user, env);
   return json(
     { user: safeUser(user) },
     200,
@@ -175,9 +223,7 @@ async function login(request, env) {
   );
 }
 
-async function logout(request, env) {
-  const token = parseCookies(request.headers.get("cookie"))[COOKIE_NAME];
-  if (token) await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await sha256(token)).run();
+function logout() {
   return json(
     { ok: true },
     200,
@@ -197,24 +243,21 @@ async function judgeDashboard(request, env) {
     return {
       ...team,
       category,
-      mandatory: user.judge_type === "company" && user.company_category_id === team.categoryId,
+      mandatory: user.judgeType === "company" && user.companyCategoryId === team.categoryId,
       scored: Boolean(own),
       recommended: recommended.includes(team.id),
       progress: { count: progress.count, required: progress.required },
       scores: own ? {
-        impact: own.impact,
-        innovation: own.innovation,
-        execution: own.execution,
-        presentation: own.presentation
+        impact: Number(own.impact),
+        innovation: Number(own.innovation),
+        execution: Number(own.execution),
+        presentation: Number(own.presentation)
       } : null,
       notes: own?.notes || ""
     };
   });
   return json({
-    user: safeUser(user),
-    categories,
-    criteria,
-    teams: judgeTeams,
+    user: safeUser(user), categories, criteria, teams: judgeTeams,
     summary: {
       scored: judgeTeams.filter(team => team.scored).length,
       requiredRemaining: judgeTeams.filter(team => team.mandatory && !team.scored).length,
@@ -239,29 +282,24 @@ async function saveScore(request, env, teamId) {
   const notes = String(body.notes || "").trim().slice(0, 1000);
   const weightedScore = Number(computeWeightedScore(scores).toFixed(2));
   const submittedAt = new Date().toISOString();
-  await env.DB.prepare(`
-    INSERT INTO scores (
-      team_id, judge_id, impact, innovation, execution, presentation, notes, weighted_score, submitted_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(team_id, judge_id) DO UPDATE SET
-      impact = excluded.impact,
-      innovation = excluded.innovation,
-      execution = excluded.execution,
-      presentation = excluded.presentation,
-      notes = excluded.notes,
-      weighted_score = excluded.weighted_score,
-      submitted_at = excluded.submitted_at
-  `).bind(
-    team.id,
-    user.id,
-    scores.impact,
-    scores.innovation,
-    scores.execution,
-    scores.presentation,
-    notes,
-    weightedScore,
-    submittedAt
-  ).run();
+  const category = categories.find(item => item.id === team.categoryId);
+  await sheetsRequest(env, "submit", {
+    event_id: crypto.randomUUID(),
+    submitted_at: submittedAt,
+    team_id: team.id,
+    team_name: team.name,
+    category_id: team.categoryId,
+    category_name: category.name,
+    table: team.table,
+    judge_id: user.id,
+    judge_name: user.name,
+    impact: scores.impact,
+    innovation: scores.innovation,
+    execution: scores.execution,
+    presentation: scores.presentation,
+    weighted_score: weightedScore,
+    notes
+  });
   return json({ ok: true, submittedAt });
 }
 
@@ -269,16 +307,9 @@ async function adminDashboard(request, env) {
   const user = await requireUser(request, env, "admin");
   const rows = await scoreRows(env);
   const required = Math.max(1, Number(env.MIN_JUDGES || 3));
-  const judgeIds = [...new Set(rows.map(row => row.judge_id))];
-  const judgeNames = new Map();
-  if (judgeIds.length) {
-    const placeholders = judgeIds.map(() => "?").join(",");
-    const result = await env.DB.prepare(`SELECT id, name FROM users WHERE id IN (${placeholders})`).bind(...judgeIds).all();
-    for (const judge of result.results || []) judgeNames.set(judge.id, judge.name);
-  }
   const teamRows = teams.map(team => {
     const entries = rows.filter(row => row.team_id === team.id);
-    const average = entries.length ? entries.reduce((sum, entry) => sum + entry.weighted_score, 0) / entries.length : null;
+    const average = entries.length ? entries.reduce((sum, entry) => sum + Number(entry.weighted_score), 0) / entries.length : null;
     return {
       ...team,
       category: categories.find(item => item.id === team.categoryId),
@@ -286,14 +317,12 @@ async function adminDashboard(request, env) {
       required,
       status: entries.length >= required ? "complete" : entries.length ? "in-progress" : "not-started",
       averageScore: average === null ? null : Number(average.toFixed(2)),
-      judges: entries.map(entry => ({ name: judgeNames.get(entry.judge_id) || "Unknown", submittedAt: entry.submitted_at }))
+      judges: entries.map(entry => ({ name: entry.judge_name || "Unknown", submittedAt: entry.submitted_at }))
     };
   });
   const completed = teamRows.filter(team => team.status === "complete").length;
   return json({
-    user: safeUser(user),
-    categories,
-    teams: teamRows,
+    user: safeUser(user), categories, teams: teamRows,
     summary: {
       completed,
       total: teams.length,
@@ -307,10 +336,10 @@ async function adminDashboard(request, env) {
 export async function handleApi(request, env) {
   assertSameOrigin(request);
   const { pathname } = new URL(request.url);
-  if (pathname === "/api/health" && request.method === "GET") return json({ ok: true });
+  if (pathname === "/api/health" && request.method === "GET") return json({ ok: true, storage: "google-sheets" });
   if (pathname === "/api/session" && request.method === "GET") return json({ user: safeUser(await currentUser(request, env)) });
   if (pathname === "/api/login" && request.method === "POST") return login(request, env);
-  if (pathname === "/api/logout" && request.method === "POST") return logout(request, env);
+  if (pathname === "/api/logout" && request.method === "POST") return logout();
   if (pathname === "/api/judge/dashboard" && request.method === "GET") return judgeDashboard(request, env);
   if (pathname === "/api/admin/dashboard" && request.method === "GET") return adminDashboard(request, env);
   const scoreMatch = pathname.match(/^\/api\/teams\/([^/]+)\/score$/);
@@ -325,8 +354,6 @@ async function serveAsset(request, env) {
   headers.set("Referrer-Policy", "no-referrer");
   headers.set("Content-Security-Policy", CONTENT_SECURITY_POLICY);
   headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
-  const pathname = new URL(request.url).pathname;
-  headers.set("Cache-Control", pathname === "/" || pathname.endsWith(".html") ? "no-store" : "public, max-age=3600");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
