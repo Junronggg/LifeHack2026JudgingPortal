@@ -22,7 +22,20 @@ test("Worker reports Google Sheets storage without accessing it", async () => {
   const { handleApi } = await import("../src/worker.mjs");
   const response = await handleApi(new Request("https://example.com/api/health"), {});
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { ok: true, storage: "google-sheets" });
+  assert.deepEqual(await response.json(), { ok: true, storage: "google-sheets", demo: false });
+});
+
+test("Demo mode supports the public judge login without secrets", { concurrency: false }, async () => {
+  const { handleApi } = await import("../src/worker.mjs");
+  const env = { DEMO_MODE: "true", MIN_JUDGES: "1" };
+  const response = await handleApi(new Request("https://portal.example/api/login", {
+    method: "POST",
+    headers: { origin: "https://portal.example", "content-type": "application/json" },
+    body: JSON.stringify({ email: "judge@lifehack.test", password: "lifehack2026" })
+  }), env);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).user.id, "demo-judge");
+  assert.match(response.headers.get("set-cookie"), /^judging_session=/);
 });
 
 test("Worker blocks cross-origin state-changing requests", async () => {

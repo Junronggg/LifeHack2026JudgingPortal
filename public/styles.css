@@ -65,6 +65,9 @@ button { cursor: pointer; }
 .login-card { width: min(430px, 100%); }
 .login-card h2 { margin: 0 0 10px; font-family: Georgia, serif; font-size: 39px; font-weight: 500; letter-spacing: -.035em; }
 .subtle { color: var(--muted); line-height: 1.55; }
+.demo-account { display: grid; grid-template-columns: 1fr; gap: 4px; margin-top: 18px; padding: 14px 16px; border: 1px solid rgba(201,150,74,.35); border-radius: 12px; background: rgba(201,150,74,.08); }
+.demo-account span { color: var(--gold); font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.demo-account strong { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 13px; }
 .field { margin-top: 22px; }
 .field label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 750; }
 .field input, .field textarea {

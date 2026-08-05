@@ -3,6 +3,19 @@ import { categories, computeWeightedScore, criteria, teams } from "./config.mjs"
 const SESSION_TTL_SECONDS = 12 * 60 * 60;
 const MAX_BODY_BYTES = 1_000_000;
 const COOKIE_NAME = "judging_session";
+const DEMO_EMAIL = "judge@lifehack.test";
+const DEMO_PASSWORD = "lifehack2026";
+const DEMO_SESSION_SECRET = "lifehack-2026-public-demo-session-key";
+const demoScores = new Map();
+const DEMO_USER = {
+  id: "demo-judge",
+  name: "Demo Judge",
+  email: DEMO_EMAIL,
+  role: "judge",
+  judgeType: "general",
+  companyCategoryId: null,
+  active: true
+};
 const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
@@ -83,6 +96,7 @@ export async function verifyPassword(password, saltBase64, expectedHashBase64, i
 }
 
 function usersFromEnv(env) {
+  if (env.DEMO_MODE === "true") return [DEMO_USER];
   try {
     const users = JSON.parse(env.USERS_JSON);
     if (!Array.isArray(users)) throw new Error("not an array");
@@ -90,6 +104,10 @@ function usersFromEnv(env) {
   } catch {
     throw new ApiError(500, "User accounts are not configured.");
   }
+}
+
+function sessionSecret(env) {
+  return env.DEMO_MODE === "true" ? DEMO_SESSION_SECRET : env.SESSION_SECRET;
 }
 
 function safeUser(user) {
@@ -107,15 +125,16 @@ function safeUser(user) {
 async function createSession(user, env) {
   const now = Math.floor(Date.now() / 1000);
   const payload = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({ sub: user.id, iat: now, exp: now + SESSION_TTL_SECONDS })));
-  const signature = bytesToBase64Url(await hmac(payload, env.SESSION_SECRET));
+  const signature = bytesToBase64Url(await hmac(payload, sessionSecret(env)));
   return `${payload}.${signature}`;
 }
 
 async function verifySession(token, env) {
-  if (!token || !env.SESSION_SECRET) return null;
+  const secret = sessionSecret(env);
+  if (!token || !secret) return null;
   const [payload, signature, extra] = token.split(".");
   if (!payload || !signature || extra) return null;
-  const expected = await hmac(payload, env.SESSION_SECRET);
+  const expected = await hmac(payload, secret);
   let supplied;
   try { supplied = base64UrlToBytes(signature); } catch { return null; }
   if (!constantTimeEqual(expected, supplied)) return null;
@@ -155,6 +174,14 @@ function assertSameOrigin(request) {
 }
 
 async function sheetsRequest(env, action, data = null) {
+  if (env.DEMO_MODE === "true") {
+    if (action === "snapshot") return [...demoScores.values()];
+    if (action === "submit") {
+      demoScores.set(`${data.team_id}:${data.judge_id}`, data);
+      return { submitted_at: data.submitted_at };
+    }
+    throw new ApiError(400, "Unsupported demo action.");
+  }
   if (!env.SHEETS_WEB_APP_URL || !env.SHEETS_SHARED_SECRET) throw new ApiError(500, "Google Sheets is not configured.");
   const payload = JSON.stringify({
     timestamp: Date.now(),
@@ -208,12 +235,14 @@ async function login(request, env) {
   const body = await readJson(request);
   const email = String(body.email || "").trim().toLowerCase();
   const user = usersFromEnv(env).find(item => item.email.toLowerCase() === email);
-  const valid = user?.active !== false && await verifyPassword(
-    String(body.password || ""),
-    user.passwordSalt,
-    user.passwordHash,
-    user.passwordIterations
-  );
+  const valid = env.DEMO_MODE === "true"
+    ? user?.active !== false && String(body.password || "") === DEMO_PASSWORD
+    : user?.active !== false && await verifyPassword(
+      String(body.password || ""),
+      user.passwordSalt,
+      user.passwordHash,
+      user.passwordIterations
+    );
   if (!valid) throw new ApiError(401, "Email or password is incorrect.");
   const token = await createSession(user, env);
   return json(
@@ -336,7 +365,9 @@ async function adminDashboard(request, env) {
 export async function handleApi(request, env) {
   assertSameOrigin(request);
   const { pathname } = new URL(request.url);
-  if (pathname === "/api/health" && request.method === "GET") return json({ ok: true, storage: "google-sheets" });
+  if (pathname === "/api/health" && request.method === "GET") {
+    return json({ ok: true, storage: env.DEMO_MODE === "true" ? "demo-memory" : "google-sheets", demo: env.DEMO_MODE === "true" });
+  }
   if (pathname === "/api/session" && request.method === "GET") return json({ user: safeUser(await currentUser(request, env)) });
   if (pathname === "/api/login" && request.method === "POST") return login(request, env);
   if (pathname === "/api/logout" && request.method === "POST") return logout();

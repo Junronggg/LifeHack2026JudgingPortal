@@ -59,9 +59,10 @@ function renderLogin() {
       <form class="login-card" id="login-form">
         <p class="eyebrow">Welcome back</p>
         <h2>Sign in to judge</h2>
-        <p class="subtle">Use the account provided by the organising team.</p>
-        <div class="field"><label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="username" placeholder="you@example.com" required></div>
-        <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></div>
+        <p class="subtle">Use the demonstration judge account below.</p>
+        <div class="demo-account"><span>Demo account</span><strong>judge@lifehack.test</strong><strong>lifehack2026</strong></div>
+        <div class="field"><label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="username" value="judge@lifehack.test" required></div>
+        <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" value="lifehack2026" required></div>
         <div class="form-error" id="login-error" role="alert"></div>
         <button class="primary-button" type="submit">Continue to portal</button>
       </form>
